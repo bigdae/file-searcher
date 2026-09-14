@@ -82,6 +82,9 @@ pub fn index_folder(
 
     state.busy.store(true, Ordering::Relaxed);
 
+    const COMMIT_BATCH: usize = 500;
+    let mut pending = 0usize;
+
     emit_status(app, state, &format!("스캔 완료: {total}개 파일"), Some((0, total)));
 
     for (i, f) in files.iter().enumerate() {
@@ -110,7 +113,14 @@ pub fn index_folder(
                 f.mtime,
                 f.size,
             )?;
-            engine.commit()?;
+            // commit in batches: per-file commit creates a new segment and
+            // fsyncs meta.json every time, which stalls at tens of thousands
+            // of files
+            pending += 1;
+            if pending >= COMMIT_BATCH {
+                engine.commit()?;
+                pending = 0;
+            }
         }
         state.db.upsert_file(folder_id, &f.path, f.size, f.mtime, &doc_id, "ok")?;
         indexed += 1;
@@ -191,13 +201,18 @@ fn handle_events(app: &tauri::AppHandle, state: &Arc<AppState>, events: Vec<Debo
     state.busy.store(true, Ordering::Relaxed);
 
     let mut seen: HashSet<String> = HashSet::new();
+    let mut processed = false;
     for ev in &events {
         for path in &ev.paths {
             let p = path.to_string_lossy().to_string();
             if seen.insert(p.clone()) {
                 let _ = process_path(app, state, path);
+                processed = true;
             }
         }
+    }
+    if processed {
+        let _ = state.engine.lock().unwrap().commit();
     }
 
     state.busy.store(false, Ordering::Relaxed);
@@ -210,7 +225,6 @@ fn process_path(app: &tauri::AppHandle, state: &AppState, path: &Path) -> Result
     if !path.exists() {
         if let Some(doc_id) = state.db.delete_file(&path_str)? {
             state.engine.lock().unwrap().remove(&doc_id)?;
-            state.engine.lock().unwrap().commit()?;
         }
         return Ok(());
     }
@@ -263,7 +277,6 @@ fn process_path(app: &tauri::AppHandle, state: &AppState, path: &Path) -> Result
         mtime,
         meta.len(),
     )?;
-    state.engine.lock().unwrap().commit()?;
     state.db.upsert_file(folder_id, &path_str, meta.len(), mtime, &doc_id, "ok")?;
 
     emit_status(app, state, &format!("갱신: {}", crate::core::filename_of(&path_str)), None);
