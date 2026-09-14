@@ -1,0 +1,50 @@
+[package]
+name = "file-search-app"
+version = "0.1.0"
+description = "Local file search for Windows and macOS"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "file_search_app"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+anyhow = "1"
+tauri = { version = "2.11.3", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+
+# search engine
+tantivy = "0.22"
+
+# database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# scanner / watcher
+walkdir = "2"
+notify = "6"
+notify-debouncer-full = "0.3"
+
+# extraction
+zip = "2"
+quick-xml = "0.36"
+pdf-extract = "0.7"
+encoding_rs = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+# async / queue
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+uuid = { version = "1", features = ["v4"] }
