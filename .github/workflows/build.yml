@@ -37,7 +37,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: "."
-          tauriScript: cargo tauri
+          tauriScript: npx @tauri-apps/cli
           # 서명 미설정 단계: 서명 도입 시 환경변수 추가
           # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
