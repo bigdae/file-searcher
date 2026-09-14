@@ -67,7 +67,9 @@ impl Db {
             );
             "#,
         )?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     pub fn data_dir() -> PathBuf {
@@ -157,7 +159,8 @@ impl Db {
 
     pub fn get_file(&self, path: &str) -> Result<Option<FileMeta>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT path, size, mtime, status FROM files WHERE path = ?1")?;
+        let mut stmt =
+            conn.prepare("SELECT path, size, mtime, status FROM files WHERE path = ?1")?;
         let mut rows = stmt.query_map(params![path], |r| {
             Ok(FileMeta {
                 path: r.get(0)?,
@@ -172,7 +175,15 @@ impl Db {
         }
     }
 
-    pub fn upsert_file(&self, folder_id: i64, path: &str, size: u64, mtime: i64, doc_id: &str, status: &str) -> Result<()> {
+    pub fn upsert_file(
+        &self,
+        folder_id: i64,
+        path: &str,
+        size: u64,
+        mtime: i64,
+        doc_id: &str,
+        status: &str,
+    ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             r#"
@@ -186,7 +197,15 @@ impl Db {
                 indexed_at = excluded.indexed_at,
                 status = excluded.status
             "#,
-            params![folder_id, path, size as i64, mtime, doc_id, chrono::Utc::now().timestamp(), status],
+            params![
+                folder_id,
+                path,
+                size as i64,
+                mtime,
+                doc_id,
+                chrono::Utc::now().timestamp(),
+                status
+            ],
         )?;
         Ok(())
     }
@@ -194,7 +213,11 @@ impl Db {
     pub fn delete_file(&self, path: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let doc_id: Option<String> = conn
-            .query_row("SELECT doc_id FROM files WHERE path = ?1", params![path], |r| r.get(0))
+            .query_row(
+                "SELECT doc_id FROM files WHERE path = ?1",
+                params![path],
+                |r| r.get(0),
+            )
             .ok();
         conn.execute("DELETE FROM files WHERE path = ?1", params![path])?;
         Ok(doc_id)
@@ -202,21 +225,34 @@ impl Db {
 
     #[allow(dead_code)]
     pub fn delete_files_under(&self, folder_prefix: &str) -> Result<Vec<(String, String)>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT path, doc_id FROM files WHERE path LIKE ?1")?;
-        let pattern = format!("{folder_prefix}%");
-        let rows = stmt.query_map(params![pattern], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        let pairs: Vec<_> = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-        conn.execute("DELETE FROM files WHERE path LIKE ?1", params![pattern])?;
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        // SQL LIKE treats '%' and '_' as wildcards and also matches sibling
+        // folders. Use the same component boundary check as search filtering.
+        let pairs: Vec<(String, String)> = {
+            let mut stmt = tx.prepare("SELECT path, doc_id FROM files")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .filter(|(path, _)| crate::core::path_under(path, folder_prefix))
+                .collect()
+        };
+        for (path, _) in &pairs {
+            tx.execute("DELETE FROM files WHERE path = ?1", params![path])?;
+        }
+        tx.commit()?;
         Ok(pairs)
     }
 
     pub fn doc_id_of(&self, path: &str) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let doc_id: Option<String> = conn
-            .query_row("SELECT doc_id FROM files WHERE path = ?1", params![path], |r| r.get(0))
+            .query_row(
+                "SELECT doc_id FROM files WHERE path = ?1",
+                params![path],
+                |r| r.get(0),
+            )
             .ok();
         Ok(doc_id)
     }

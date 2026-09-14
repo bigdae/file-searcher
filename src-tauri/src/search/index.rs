@@ -52,7 +52,14 @@ impl SearchEngine {
             index,
             reader,
             writer,
-            fields: Fields { doc_id, path: path_f, filename, extension, modified_at, size },
+            fields: Fields {
+                doc_id,
+                path: path_f,
+                filename,
+                extension,
+                modified_at,
+                size,
+            },
         })
     }
 
@@ -66,7 +73,8 @@ impl SearchEngine {
         modified_at: i64,
         size: u64,
     ) -> Result<()> {
-        self.writer.delete_term(Term::from_field_text(self.fields.doc_id, doc_id));
+        self.writer
+            .delete_term(Term::from_field_text(self.fields.doc_id, doc_id));
 
         let mut d = TantivyDocument::default();
         d.add_text(self.fields.doc_id, doc_id);
@@ -80,7 +88,8 @@ impl SearchEngine {
     }
 
     pub fn remove(&mut self, doc_id: &str) -> Result<()> {
-        self.writer.delete_term(Term::from_field_text(self.fields.doc_id, doc_id));
+        self.writer
+            .delete_term(Term::from_field_text(self.fields.doc_id, doc_id));
         Ok(())
     }
 
@@ -88,6 +97,61 @@ impl SearchEngine {
         self.writer.commit()?;
         self.reader.reload()?;
         Ok(())
+    }
+
+    /// Check committed data before trusting SQLite's incremental-index marker.
+    pub fn contains_document(
+        &self,
+        doc_id: &str,
+        path: &str,
+        modified_at: i64,
+        size: u64,
+    ) -> Result<bool> {
+        let searcher = self.reader.searcher();
+        let query = tantivy::query::TermQuery::new(
+            Term::from_field_text(self.fields.doc_id, doc_id),
+            IndexRecordOption::Basic,
+        );
+        let (docs, count) = searcher.search(&query, &(TopDocs::with_limit(1), Count))?;
+        if count != 1 {
+            return Ok(false);
+        }
+        let doc: TantivyDocument = searcher.doc(docs[0].1)?;
+        Ok(
+            doc.get_first(self.fields.path).and_then(|v| v.as_str()) == Some(path)
+                && doc
+                    .get_first(self.fields.modified_at)
+                    .and_then(|v| v.as_i64())
+                    == Some(modified_at)
+                && doc.get_first(self.fields.size).and_then(|v| v.as_u64()) == Some(size),
+        )
+    }
+
+    /// Remove obsolete UUIDs left behind by older indexing runs or interrupted deletions.
+    pub fn prune_unknown_documents(
+        &mut self,
+        valid_doc_ids: &std::collections::HashSet<String>,
+    ) -> Result<usize> {
+        let searcher = self.reader.searcher();
+        let addresses = searcher.search(
+            &tantivy::query::AllQuery,
+            &tantivy::collector::DocSetCollector,
+        )?;
+        let mut removed = 0;
+        for address in addresses {
+            let doc: TantivyDocument = searcher.doc(address)?;
+            if let Some(doc_id) = doc.get_first(self.fields.doc_id).and_then(|v| v.as_str()) {
+                if !valid_doc_ids.contains(doc_id) {
+                    self.writer
+                        .delete_term(Term::from_field_text(self.fields.doc_id, doc_id));
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            self.commit()?;
+        }
+        Ok(removed)
     }
 
     pub fn search(
@@ -99,24 +163,31 @@ impl SearchEngine {
         let started = std::time::Instant::now();
         let searcher = self.reader.searcher();
 
-        let mut query_parser = QueryParser::for_index(
-            &self.index,
-            vec![self.fields.filename, self.fields.path],
-        );
+        let mut query_parser =
+            QueryParser::for_index(&self.index, vec![self.fields.filename, self.fields.path]);
         query_parser.set_conjunction_by_default();
 
-        let base_query: Box<dyn Query> = query_parser
-            .parse_query(query_str)
-            .unwrap_or_else(|_| {
-                query_parser
-                    .parse_query(&crate::search::query::escape_term(query_str))
-                    .unwrap_or_else(|_| Box::new(BooleanQuery::new(vec![])))
-            });
+        let base_query: Box<dyn Query> = query_parser.parse_query(query_str).unwrap_or_else(|_| {
+            query_parser
+                .parse_query(&crate::search::query::escape_term(query_str))
+                .unwrap_or_else(|_| Box::new(BooleanQuery::new(vec![])))
+        });
 
-        let (top_docs, count) =
-            searcher.search(&base_query, &(TopDocs::with_limit(limit), Count))?;
+        let scoped = folder_paths.is_some_and(|paths| !paths.is_empty());
+        // Folder membership is stored in the document, so it must be checked
+        // before applying the result limit or computing the scoped total.
+        let collection_limit = if scoped {
+            searcher.num_docs() as usize
+        } else {
+            limit
+        };
+        let (top_docs, count) = searcher.search(
+            &base_query,
+            &(TopDocs::with_limit(collection_limit.max(1)), Count),
+        )?;
 
-        let mut hits = Vec::with_capacity(top_docs.len());
+        let mut hits = Vec::with_capacity(top_docs.len().min(limit));
+        let mut scoped_count = 0u64;
         for (score, addr) in top_docs {
             let doc: TantivyDocument = searcher.doc(addr)?;
             let path: String = doc
@@ -129,6 +200,11 @@ impl SearchEngine {
                 if !set.is_empty() && !set.iter().any(|p| crate::core::path_under(&path, p)) {
                     continue;
                 }
+            }
+
+            scoped_count += 1;
+            if hits.len() >= limit {
+                continue;
             }
 
             let filename: String = doc
@@ -166,8 +242,7 @@ impl SearchEngine {
             });
         }
 
-        let hits_len = hits.len() as u64;
-        let total = (count as u64).max(hits_len);
+        let total = if scoped { scoped_count } else { count as u64 };
         Ok(SearchResponse {
             hits,
             total,

@@ -40,7 +40,11 @@ fn open_search_engine(path: &Path) -> Result<SearchEngine, String> {
 }
 
 fn set_app_handle(h: tauri::AppHandle) {
-    APP_HANDLE.get_or_init(|| Mutex::new(None)).lock().unwrap().replace(h);
+    APP_HANDLE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap()
+        .replace(h);
 }
 
 fn app_handle() -> Option<tauri::AppHandle> {
@@ -54,62 +58,108 @@ fn list_folders(state: State<Managed>) -> Result<Vec<database::sqlite::FolderRow
 
 #[tauri::command]
 fn add_folder(state: State<Managed>, path: String) -> Result<database::sqlite::FolderRow, String> {
-    let id = state.0.db.add_folder(&path).map_err(|e| e.to_string())?;
-    // index in background so the UI never blocks
+    let path = std::fs::canonicalize(&path).map_err(|e| format!("폴더를 열 수 없습니다: {e}"))?;
+    if !path.is_dir() {
+        return Err("검색 위치는 폴더여야 합니다".into());
+    }
+    let path = path.to_string_lossy().into_owned();
     let app = app_handle().ok_or("no app")?;
+    let id = state.0.db.add_folder(&path).map_err(|e| e.to_string())?;
+    state
+        .0
+        .stop_flag
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    // index in background so the UI never blocks
     let state_bg = Arc::clone(&state.0);
     let path_bg = path.clone();
     std::thread::spawn(move || {
-        if let Err(e) = scanner::watcher::index_folder(&app, &state_bg, id, &path_bg, false) {
-            log::warn!("background indexing failed for {path_bg}: {e}");
-            state_bg.busy.store(false, std::sync::atomic::Ordering::Relaxed);
-        }
         if let Err(e) = scanner::watcher::add_watch(&state_bg, Path::new(&path_bg)) {
             log::warn!("watch registration failed for {path_bg}: {e}");
         }
+        if let Err(e) = scanner::watcher::index_folder(&app, &state_bg, id, &path_bg, false) {
+            log::warn!("background indexing failed for {path_bg}: {e}");
+        }
     });
     let rows = state.0.db.list_folders().map_err(|e| e.to_string())?;
-    rows.into_iter().find(|r| r.id == id).ok_or("folder vanished".into())
+    rows.into_iter()
+        .find(|r| r.id == id)
+        .ok_or("folder vanished".into())
 }
 
 #[tauri::command]
-fn remove_folder(state: State<Managed>, id: i64) -> Result<(), String> {
-    let folders = state.0.db.list_folders().map_err(|e| e.to_string())?;
+async fn remove_folder(state: State<'_, Managed>, id: i64) -> Result<(), String> {
+    let state = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || remove_folder_inner(&state, id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn remove_folder_inner(state: &AppState, id: i64) -> Result<(), String> {
+    let _operation = state.operation.lock().unwrap();
+    let folders = state.db.list_folders().map_err(|e| e.to_string())?;
     let path = folders
         .into_iter()
         .find(|f| f.id == id)
         .map(|f| f.path)
         .ok_or("no such folder")?;
-    let pairs = state.0.db.remove_folder(id).map_err(|e| e.to_string())?;
-    let mut engine = state.0.engine.lock().unwrap();
+    let pairs = state.db.remove_folder(id).map_err(|e| e.to_string())?;
+    let mut engine = state.engine.lock().unwrap();
     for (_, doc_id) in pairs {
-        let _ = engine.remove(&doc_id);
+        engine.remove(&doc_id).map_err(|e| e.to_string())?;
     }
     engine.commit().map_err(|e| e.to_string())?;
     drop(engine);
-    let _ = scanner::watcher::remove_watch(&state.0, Path::new(&path));
+    let _ = scanner::watcher::remove_watch(state, Path::new(&path));
     Ok(())
 }
 
 #[tauri::command]
-fn toggle_folder(state: State<Managed>, id: i64, enabled: bool) -> Result<(), String> {
-    state
-        .0
-        .db
-        .set_folder_enabled(id, enabled)
-        .map_err(|e| e.to_string())
+async fn toggle_folder(state: State<'_, Managed>, id: i64, enabled: bool) -> Result<(), String> {
+    let state_bg = Arc::clone(&state.0);
+    let folder = tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+        let _operation = state_bg.operation.lock().unwrap();
+        let folder = state_bg
+            .db
+            .list_folders()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|f| f.id == id)
+            .ok_or("no such folder")?;
+        state_bg
+            .db
+            .set_folder_enabled(id, enabled)
+            .map_err(|e| e.to_string())?;
+        Ok(folder)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if enabled {
+        scanner::watcher::add_watch(&state.0, Path::new(&folder.path))
+            .map_err(|e| e.to_string())?;
+        reindex_folder(state, id)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn reindex_folder(state: State<Managed>, id: i64) -> Result<(), String> {
     let app = app_handle().ok_or("no app")?;
     let folders = state.0.db.list_folders().map_err(|e| e.to_string())?;
-    let folder = folders.into_iter().find(|f| f.id == id).ok_or("no such folder")?;
+    let folder = folders
+        .into_iter()
+        .find(|f| f.id == id)
+        .ok_or("no such folder")?;
+    if !folder.enabled {
+        return Err("비활성화된 폴더는 인덱싱할 수 없습니다".into());
+    }
+    state
+        .0
+        .stop_flag
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     let state_bg = Arc::clone(&state.0);
     std::thread::spawn(move || {
         if let Err(e) = scanner::watcher::index_folder(&app, &state_bg, id, &folder.path, false) {
             log::warn!("reindex failed for {}: {e}", folder.path);
-            state_bg.busy.store(false, std::sync::atomic::Ordering::Relaxed);
         }
     });
     Ok(())
@@ -119,35 +169,61 @@ fn reindex_folder(state: State<Managed>, id: i64) -> Result<(), String> {
 fn reindex_all(state: State<Managed>) -> Result<(), String> {
     let app = app_handle().ok_or("no app")?;
     let folders = state.0.db.list_folders().map_err(|e| e.to_string())?;
-    for f in folders {
-        if f.enabled {
-            let app_bg = app.clone();
-            let state_bg = Arc::clone(&state.0);
-            std::thread::spawn(move || {
-                let _ = scanner::watcher::index_folder(&app_bg, &state_bg, f.id, &f.path, false);
-            });
+    state
+        .0
+        .stop_flag
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    let state_bg = Arc::clone(&state.0);
+    std::thread::spawn(move || {
+        for f in folders.into_iter().filter(|f| f.enabled) {
+            if state_bg
+                .stop_flag
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                break;
+            }
+            if let Err(e) = scanner::watcher::index_folder(&app, &state_bg, f.id, &f.path, false) {
+                log::warn!("reindex failed for {}: {e}", f.path);
+            }
         }
-    }
+    });
     Ok(())
 }
 
 #[tauri::command]
 fn stop_indexing(state: State<Managed>) -> Result<(), String> {
-    state.0.stop_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    state
+        .0
+        .stop_flag
+        .store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
 }
 
 #[tauri::command]
-fn search(query: String, state: State<Managed>) -> Result<core::SearchResponse, String> {
-    let folders = state.0.db.list_folders().map_err(|e| e.to_string())?;
+async fn search(query: String, state: State<'_, Managed>) -> Result<core::SearchResponse, String> {
+    let state = Arc::clone(&state.0);
+    tauri::async_runtime::spawn_blocking(move || search_inner(&query, &state))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn search_inner(query: &str, state: &AppState) -> Result<core::SearchResponse, String> {
+    let folders = state.db.list_folders().map_err(|e| e.to_string())?;
     let enabled: HashSet<String> = folders
         .into_iter()
         .filter(|f| f.enabled)
         .map(|f| f.path)
         .collect();
-    let engine = state.0.engine.lock().unwrap();
+    if enabled.is_empty() {
+        return Ok(core::SearchResponse {
+            hits: vec![],
+            total: 0,
+            elapsed_ms: 0,
+        });
+    }
+    let engine = state.engine.lock().unwrap();
     engine
-        .search_parsed(&query, 100, &enabled)
+        .search_parsed(query, 100, &enabled)
         .map_err(|e| e.to_string())
 }
 
@@ -188,7 +264,10 @@ fn open_target(path: &Path, reveal: bool) -> Result<(), String> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        std::process::Command::new("xdg-open").arg(path).spawn().map_err(|e| e.to_string())?;
+        std::process::Command::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -229,11 +308,23 @@ pub fn run() {
             let handle = app.handle().clone();
             let state = Arc::clone(&shared.inner);
             std::thread::spawn(move || {
-                let _ = scanner::watcher::reconcile_on_startup(&handle, &state);
+                // Earlier versions assigned a new ID on each reindex, leaving
+                // stale documents behind. The database owns the current IDs.
+                {
+                    let _operation = state.operation.lock().unwrap();
+                    let result = state.db.all_files().and_then(|files| {
+                        let ids = files.into_iter().map(|(_, id)| id).collect();
+                        state.engine.lock().unwrap().prune_unknown_documents(&ids)
+                    });
+                    if let Err(e) = result {
+                        log::warn!("stale index cleanup failed: {e}");
+                    }
+                }
                 let roots = scanner::watcher::all_watched_roots(&state);
-                if let Err(e) = scanner::watcher::start_watcher(handle, &state, roots) {
+                if let Err(e) = scanner::watcher::start_watcher(handle.clone(), &state, roots) {
                     log::warn!("watcher start failed: {e}");
                 }
+                let _ = scanner::watcher::reconcile_on_startup(&handle, &state);
             });
 
             Ok(())
@@ -257,4 +348,34 @@ pub fn run() {
             eprintln!("앱 실행 실패: {e}");
         })
         .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disabling_all_folders_hides_indexed_results() -> anyhow::Result<()> {
+        let base = std::env::temp_dir().join(format!("searcher-disabled-{}", uuid::Uuid::new_v4()));
+        let db = Db::open(&base.join("db.sqlite"))?;
+        let root = base.join("documents").to_string_lossy().into_owned();
+        let folder_id = db.add_folder(&root)?;
+        let mut engine = SearchEngine::open(&base.join("index"))?;
+        engine.add_or_replace(
+            "doc",
+            &format!("{root}/report.txt"),
+            "report.txt",
+            "txt",
+            0,
+            0,
+        )?;
+        engine.commit()?;
+        let state = AppStateShared::new(db, engine);
+        assert_eq!(search_inner("report", &state.inner).unwrap().total, 1);
+        state.inner.db.set_folder_enabled(folder_id, false)?;
+        assert_eq!(search_inner("report", &state.inner).unwrap().total, 0);
+        drop(state);
+        std::fs::remove_dir_all(base)?;
+        Ok(())
+    }
 }

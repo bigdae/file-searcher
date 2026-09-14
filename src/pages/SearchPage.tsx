@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   search,
   openFile,
@@ -41,47 +41,38 @@ function highlight(text: string, query: string): React.ReactNode {
   );
 }
 
-export default function SearchPage() {
+export default function SearchPage({ indexVersion }: { indexVersion: number }) {
   const [query, setQuery] = useState("");
   const [result, setResult] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sortKey, setSortKey] = useState<"score" | "modified" | "name" | "size">("score");
-  const debounceRef = useRef<number | null>(null);
-
-  const runSearch = useCallback(
-    async (q: string) => {
-      if (!q.trim()) {
-        setResult(null);
-        return;
-      }
-      setLoading(true);
-      setError(null);
-      try {
-        const res = await search(q);
-        setResult(res);
-      } catch (e) {
-        setError(String(e));
-      } finally {
-        setLoading(false);
-      }
-    },
-    [],
-  );
-
   useEffect(() => {
-    if (debounceRef.current) window.clearTimeout(debounceRef.current);
-    if (!query.trim()) {
-      setResult(null);
-      return;
-    }
-    debounceRef.current = window.setTimeout(() => runSearch(query), 200);
-    return () => {
-      if (debounceRef.current) window.clearTimeout(debounceRef.current);
-    };
-  }, [query, runSearch]);
+    let active = true;
+    setResult(null);
+    setError(null);
+    setLoading(false);
+    if (!query.trim()) return;
 
-  const hits = result?.hits ?? [...(result?.hits ?? [])].sort((a, b) => {
+    const timer = window.setTimeout(async () => {
+      if (!active) return;
+      setLoading(true);
+      try {
+        const res = await search(query);
+        if (active) setResult(res);
+      } catch (e) {
+        if (active) setError(String(e));
+      } finally {
+        if (active) setLoading(false);
+      }
+    }, 200);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [query, indexVersion]);
+
+  const hits = [...(result?.hits ?? [])].sort((a, b) => {
     switch (sortKey) {
       case "modified":
         return b.modified_at - a.modified_at;
@@ -93,6 +84,14 @@ export default function SearchPage() {
         return b.score - a.score;
     }
   });
+
+  async function handleFileAction(action: () => Promise<void>) {
+    try {
+      await action();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   return (
     <div className="search-page">
@@ -131,10 +130,10 @@ export default function SearchPage() {
       <div className="results">
         {hits.map((hit: SearchHit) => (
           <div className="hit" key={hit.doc_id}>
-            <div className="hit-title" onClick={() => openFile(hit.path)}>
+            <div className="hit-title" onClick={() => handleFileAction(() => openFile(hit.path))}>
               {highlight(hit.filename, query)}
             </div>
-            <div className="hit-path" onClick={() => revealInFolder(hit.path)}>
+            <div className="hit-path" onClick={() => handleFileAction(() => revealInFolder(hit.path))}>
               {hit.path}
             </div>
             <div className="hit-info">

@@ -4,11 +4,7 @@ use file_search_app::search::index::SearchEngine;
 use std::collections::HashSet;
 
 fn temp_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "fs-test-{}-{}",
-        tag,
-        uuid::Uuid::new_v4()
-    ));
+    let dir = std::env::temp_dir().join(format!("fs-test-{}-{}", tag, uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -102,9 +98,23 @@ fn incremental_skip_unchanged() -> Result<()> {
         .as_secs() as i64;
 
     let doc_id = "d1".to_string();
-    engine.add_or_replace(&doc_id, path.to_str().unwrap(), "a.txt", "txt", mtime, meta.len())?;
+    engine.add_or_replace(
+        &doc_id,
+        path.to_str().unwrap(),
+        "a.txt",
+        "txt",
+        mtime,
+        meta.len(),
+    )?;
     engine.commit()?;
-    db.upsert_file(folder_id, path.to_str().unwrap(), meta.len(), mtime, &doc_id, "ok")?;
+    db.upsert_file(
+        folder_id,
+        path.to_str().unwrap(),
+        meta.len(),
+        mtime,
+        &doc_id,
+        "ok",
+    )?;
 
     let stored = db.get_file(path.to_str().unwrap())?.unwrap();
     assert_eq!(stored.mtime, mtime);
@@ -121,7 +131,131 @@ fn path_under_matches_correctly() {
     use file_search_app::core::path_under;
     assert!(path_under("/Users/me/Projects/a.txt", "/Users/me/Projects"));
     assert!(path_under("/Users/me/Projects", "/Users/me/Projects"));
-    assert!(!path_under("/Users/me/ProjectsBackup/a.txt", "/Users/me/Projects"));
+    assert!(!path_under(
+        "/Users/me/ProjectsBackup/a.txt",
+        "/Users/me/Projects"
+    ));
     // trailing separator normalization
-    assert!(path_under("/Users/me/Projects/a.txt", "/Users/me/Projects/"));
+    assert!(path_under(
+        "/Users/me/Projects/a.txt",
+        "/Users/me/Projects/"
+    ));
+}
+
+#[test]
+fn folder_filter_applies_before_limit_and_total() -> Result<()> {
+    let mut engine = SearchEngine::open(&temp_dir("scope-index"))?;
+    for i in 0..12 {
+        engine.add_or_replace(
+            &format!("outside-{i}"),
+            &format!("/other/report{i}.txt"),
+            "report.txt",
+            "txt",
+            0,
+            1,
+        )?;
+    }
+    for i in 0..3 {
+        engine.add_or_replace(
+            &format!("inside-{i}"),
+            &format!("/selected/report{i}.txt"),
+            "report.txt",
+            "txt",
+            0,
+            1,
+        )?;
+    }
+    engine.commit()?;
+    let roots = HashSet::from(["/selected".to_string()]);
+    let response = engine.search_parsed("report", 2, &roots)?;
+    assert_eq!(response.total, 3);
+    assert_eq!(response.hits.len(), 2);
+    assert!(response
+        .hits
+        .iter()
+        .all(|hit| hit.path.starts_with("/selected/")));
+    let zero = engine.search_parsed("report", 0, &roots)?;
+    assert_eq!(zero.total, 3);
+    assert!(zero.hits.is_empty());
+    let unscoped_zero = engine.search_parsed("report", 0, &HashSet::new())?;
+    assert_eq!(unscoped_zero.total, 15);
+    assert!(unscoped_zero.hits.is_empty());
+    Ok(())
+}
+
+#[test]
+fn recursive_deletion_respects_folder_boundaries_and_literal_names() -> Result<()> {
+    let db = Db::open(&temp_dir("delete-scope").join("index.db"))?;
+    let folder_id = db.add_folder("/files")?;
+    let paths = [
+        "/files/a_%.dir/one.txt",
+        "/files/a_%.dir/sub/two.txt",
+        "/files/a_%.dir-backup/keep.txt",
+        "/files/abX.dir/keep.txt",
+    ];
+    for (i, path) in paths.iter().enumerate() {
+        db.upsert_file(folder_id, path, 1, 0, &format!("doc-{i}"), "ok")?;
+    }
+    let deleted = db.delete_files_under("/files/a_%.dir/")?;
+    assert_eq!(deleted.len(), 2);
+    assert!(db.get_file(paths[0])?.is_none());
+    assert!(db.get_file(paths[1])?.is_none());
+    assert!(db.get_file(paths[2])?.is_some());
+    assert!(db.get_file(paths[3])?.is_some());
+    Ok(())
+}
+
+#[test]
+fn committed_document_check_detects_missing_and_stale_index() -> Result<()> {
+    let index_dir = temp_dir("committed-index");
+    let db = Db::open(&temp_dir("committed-db").join("index.db"))?;
+    let folder_id = db.add_folder("/files")?;
+    let path = "/files/report.txt";
+    db.upsert_file(folder_id, path, 10, 1, "stable-id", "ok")?;
+    let mut engine = SearchEngine::open(&index_dir)?;
+    assert!(!engine.contains_document("stable-id", path, 1, 10)?);
+    engine.add_or_replace("stable-id", path, "report.txt", "txt", 1, 10)?;
+    assert!(!engine.contains_document("stable-id", path, 1, 10)?);
+    engine.commit()?;
+    assert!(engine.contains_document("stable-id", path, 1, 10)?);
+    assert!(!engine.contains_document("stable-id", path, 2, 20)?);
+    assert!(!engine.contains_document("stable-id", "/other/report.txt", 1, 10)?);
+    engine.add_or_replace("stable-id", path, "report.txt", "txt", 2, 20)?;
+    engine.commit()?;
+    drop(engine);
+    let engine = SearchEngine::open(&index_dir)?;
+    assert!(engine.contains_document("stable-id", path, 2, 20)?);
+    assert!(!engine.contains_document("stable-id", path, 1, 10)?);
+    assert_eq!(
+        engine.search_parsed("report", 10, &HashSet::new())?.total,
+        1
+    );
+    // Rebuilding the index cannot trust an otherwise unchanged SQLite row.
+    let rebuilt = SearchEngine::open(&temp_dir("rebuilt-index"))?;
+    assert_eq!(db.get_file(path)?.unwrap().status, "ok");
+    assert!(!rebuilt.contains_document("stable-id", path, 1, 10)?);
+    Ok(())
+}
+
+#[test]
+fn startup_pruning_removes_old_ids_and_preserves_current_documents() -> Result<()> {
+    let mut engine = SearchEngine::open(&temp_dir("prune-index"))?;
+    for id in ["old-id", "current-id", "orphan-id"] {
+        engine.add_or_replace(id, "/files/report.txt", "report.txt", "txt", 1, 10)?;
+    }
+    engine.commit()?;
+    let valid = HashSet::from(["current-id".to_string()]);
+    assert_eq!(engine.prune_unknown_documents(&valid)?, 2);
+    assert!(engine.contains_document("current-id", "/files/report.txt", 1, 10)?);
+    assert_eq!(
+        engine.search_parsed("report", 10, &HashSet::new())?.total,
+        1
+    );
+    assert_eq!(engine.prune_unknown_documents(&valid)?, 0);
+    assert_eq!(engine.prune_unknown_documents(&HashSet::new())?, 1);
+    assert_eq!(
+        engine.search_parsed("report", 10, &HashSet::new())?.total,
+        0
+    );
+    Ok(())
 }

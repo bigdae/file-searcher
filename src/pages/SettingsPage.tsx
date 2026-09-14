@@ -16,10 +16,17 @@ export default function SettingsPage() {
   const [errors, setErrors] = useState<[string, string, number][]>([]);
   const [busyFolder, setBusyFolder] = useState<number | null>(null);
   const [addError, setAddError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
 
   async function refresh() {
-    setFolders(await listFolders());
-    setErrors(await recentErrors());
+    try {
+      const [nextFolders, nextErrors] = await Promise.all([listFolders(), recentErrors()]);
+      setFolders(nextFolders);
+      setErrors(nextErrors);
+    } catch (e) {
+      setAddError(`목록 조회 실패: ${e}`);
+    }
   }
 
   useEffect(() => {
@@ -42,20 +49,37 @@ export default function SettingsPage() {
   }
 
   async function handleRemove(id: number) {
-    await removeFolder(id);
-    await refresh();
+    await handleAction(id, "폴더 제거", () => removeFolder(id));
   }
 
   async function handleToggle(f: FolderRow) {
-    await toggleFolder(f.id, !f.enabled);
-    await refresh();
+    await handleAction(f.id, "폴더 설정 변경", () => toggleFolder(f.id, !f.enabled));
   }
 
   async function handleReindex(id: number) {
-    setBusyFolder(id);
+    await handleAction(id, "재인덱싱", () => reindexFolder(id));
+  }
+
+  async function handleStop() {
+    setStopping(true);
+    setStopError(null);
     try {
-      await reindexFolder(id);
+      await stopIndexing();
+    } catch (e) {
+      setStopError(`인덱싱 중지 실패: ${e}`);
+    } finally {
+      setStopping(false);
+    }
+  }
+
+  async function handleAction(id: number, label: string, action: () => Promise<void>) {
+    setBusyFolder(id);
+    setAddError(null);
+    try {
+      await action();
       await refresh();
+    } catch (e) {
+      setAddError(`${label} 실패: ${e}`);
     } finally {
       setBusyFolder(null);
     }
@@ -72,19 +96,20 @@ export default function SettingsPage() {
         <div className="panel-head">
           <h2>검색 위치</h2>
           <div className="panel-actions">
-            <button onClick={handleAdd} disabled={busyFolder === -1}>
+            <button onClick={handleAdd} disabled={busyFolder !== null}>
               + 폴더 추가
             </button>
-            <button onClick={() => reindexAll()}>전체 재인덱싱</button>
-            <button onClick={() => stopIndexing()}>인덱싱 중지</button>
+            <button onClick={() => handleAction(-2, "전체 재인덱싱", reindexAll)} disabled={busyFolder !== null}>전체 재인덱싱</button>
+            <button onClick={handleStop} disabled={stopping}>인덱싱 중지</button>
           </div>
         </div>
         {addError && <div className="error-msg" style={{ marginBottom: 8 }}>{addError}</div>}
+        {stopError && <div className="error-msg" style={{ marginBottom: 8 }}>{stopError}</div>}
         <ul className="folder-list">
           {folders.map((f) => (
             <li key={f.id} className={f.enabled ? "" : "disabled"}>
               <label className="switch">
-                <input type="checkbox" checked={f.enabled} onChange={() => handleToggle(f)} />
+                <input type="checkbox" checked={f.enabled} disabled={busyFolder !== null} onChange={() => handleToggle(f)} />
                 <span />
               </label>
               <div className="folder-info">
@@ -94,10 +119,10 @@ export default function SettingsPage() {
                 </div>
               </div>
               <div className="folder-actions">
-                <button onClick={() => handleReindex(f.id)} disabled={busyFolder === f.id}>
+                <button onClick={() => handleReindex(f.id)} disabled={busyFolder !== null || !f.enabled}>
                   {busyFolder === f.id ? "…" : "재인덱싱"}
                 </button>
-                <button className="danger" onClick={() => handleRemove(f.id)}>
+                <button className="danger" onClick={() => handleRemove(f.id)} disabled={busyFolder !== null}>
                   제거
                 </button>
               </div>

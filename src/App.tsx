@@ -7,12 +7,28 @@ type Tab = "search" | "settings";
 
 export default function App() {
   const [tab, setTab] = useState<Tab>("search");
+  const [indexVersion, setIndexVersion] = useState(0);
   const [status, setStatus] = useState<IndexStatus>({ busy: false, message: "", done: null, total: null });
 
   useEffect(() => {
+    let disposed = false;
     let un: (() => void) | undefined;
-    onIndexStatus((s) => setStatus(s)).then((f) => (un = f));
-    return () => un?.();
+    onIndexStatus((s) => {
+      if (disposed) return;
+      setStatus(s);
+      if (!s.busy) setIndexVersion((version) => version + 1);
+    })
+      .then((f) => {
+        if (disposed) f();
+        else un = f;
+      })
+      .catch((error) => {
+        if (!disposed) setStatus({ busy: false, message: `상태 수신 실패: ${error}`, done: null, total: null });
+      });
+    return () => {
+      disposed = true;
+      un?.();
+    };
   }, []);
 
   return (
@@ -35,7 +51,7 @@ export default function App() {
           </span>
         </div>
       </header>
-      <main className="content">{tab === "search" ? <SearchPage /> : <SettingsPage />}</main>
+      <main className="content">{tab === "search" ? <SearchPage indexVersion={indexVersion} /> : <SettingsPage />}</main>
     </div>
   );
 }
