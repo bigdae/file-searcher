@@ -2,13 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtractedDocument {
-    pub title: Option<String>,
-    pub content: String,
-    pub author: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
     pub doc_id: String,
     pub path: String,
@@ -17,7 +10,6 @@ pub struct SearchHit {
     pub size: u64,
     pub modified_at: i64,
     pub score: f32,
-    pub snippet: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,14 +17,6 @@ pub struct SearchResponse {
     pub hits: Vec<SearchHit>,
     pub total: u64,
     pub elapsed_ms: u128,
-}
-
-pub fn supported_extension(ext: &str) -> bool {
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "txt" | "md" | "csv" | "json" | "xml" | "html" | "htm" | "doc" | "docx" | "ppt"
-            | "pptx" | "xls" | "xlsx" | "pdf"
-    )
 }
 
 pub fn filename_of(path: &str) -> String {

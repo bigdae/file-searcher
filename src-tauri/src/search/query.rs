@@ -1,4 +1,3 @@
-
 use super::index::SearchEngine;
 
 /// Parse a raw query string into structured terms.
@@ -7,7 +6,7 @@ use super::index::SearchEngine;
 ///   ext:pdf   → extension filter
 ///   path:proj → path term
 ///   "quoted phrase"
-///   plain terms → all fields
+///   plain terms → filename
 pub struct ParsedQuery {
     pub filename_terms: Vec<String>,
     pub path_terms: Vec<String>,
@@ -61,46 +60,28 @@ pub fn parse(raw: &str) -> ParsedQuery {
     out
 }
 
-/// Search scope selected by the user.
-/// - `filename`         : search only the filename (fast, name lookup)
-/// - `filename_content` : search filename, path and content
-pub fn to_tantivy_query(q: &ParsedQuery, scope: &str) -> String {
-    let filename_only = scope == "filename";
+/// Build a tantivy query string from the parsed structure.
+/// Everything searches the filename; `path:` remains as an explicit filter.
+pub fn to_tantivy_query(q: &ParsedQuery) -> String {
     let mut clauses: Vec<String> = Vec::new();
 
     for t in &q.general {
-        if filename_only {
-            clauses.push(format!("filename:{}", escape(t)));
-        } else {
-            clauses.push(t.clone());
-        }
+        clauses.push(format!("filename:{}", escape(t)));
     }
     for t in &q.phrases {
-        if filename_only {
-            clauses.push(format!("filename:\"{}\"", escape(t)));
-        } else {
-            clauses.push(format!("\"{}\"", escape(t)));
-        }
+        clauses.push(format!("filename:\"{}\"", escape(t)));
     }
     for t in &q.filename_terms {
         clauses.push(format!("filename:{}", escape(t)));
     }
     for t in &q.path_terms {
-        if filename_only {
-            clauses.push(format!("filename:{}", escape(t)));
-        } else {
-            clauses.push(format!("path:{}", escape(t)));
-        }
+        clauses.push(format!("path:{}", escape(t)));
     }
     for t in &q.ext_filters {
         clauses.push(format!("extension:{}", escape(t)));
     }
 
     clauses.join(" AND ")
-}
-
-fn escape(s: &str) -> String {
-    escape_term(s)
 }
 
 /// Escape tantivy query syntax special characters.
@@ -115,18 +96,20 @@ pub fn escape_term(s: &str) -> String {
     out
 }
 
+fn escape(s: &str) -> String {
+    escape_term(s)
+}
+
 impl SearchEngine {
     /// High-level search entry that combines parse + engine call.
-    /// `scope` is "filename" or "filename_content".
     pub fn search_parsed(
         &self,
         raw: &str,
         limit: usize,
         folder_paths: &std::collections::HashSet<String>,
-        scope: &str,
     ) -> anyhow::Result<crate::core::SearchResponse> {
         let parsed = parse(raw);
-        let q = to_tantivy_query(&parsed, scope);
+        let q = to_tantivy_query(&parsed);
         self.search(&q, limit, Some(folder_paths))
     }
 }

@@ -1,4 +1,3 @@
-use crate::core::supported_extension;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -45,9 +44,6 @@ pub fn scan(folder: &Path, extra_excludes: &HashSet<String>) -> Vec<ScannedFile>
             .extension()
             .map(|s| s.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        if !supported_extension(&ext) {
-            continue;
-        }
         let meta = match entry.metadata() {
             Ok(m) => m,
             Err(_) => continue,

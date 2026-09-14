@@ -1,6 +1,5 @@
 pub mod core;
 pub mod database;
-pub mod extractor;
 pub mod scanner;
 pub mod search;
 
@@ -139,17 +138,16 @@ fn stop_indexing(state: State<Managed>) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn search(query: String, scope: Option<String>, state: State<Managed>) -> Result<core::SearchResponse, String> {
+fn search(query: String, state: State<Managed>) -> Result<core::SearchResponse, String> {
     let folders = state.0.db.list_folders().map_err(|e| e.to_string())?;
     let enabled: HashSet<String> = folders
         .into_iter()
         .filter(|f| f.enabled)
         .map(|f| f.path)
         .collect();
-    let scope = scope.unwrap_or_else(|| "filename_content".into());
     let engine = state.0.engine.lock().unwrap();
     engine
-        .search_parsed(&query, 100, &enabled, &scope)
+        .search_parsed(&query, 100, &enabled)
         .map_err(|e| e.to_string())
 }
 

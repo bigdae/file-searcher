@@ -1,5 +1,4 @@
 use crate::database::sqlite::Db;
-use crate::extractor;
 use crate::search::index::SearchEngine;
 use anyhow::Result;
 use notify::Watcher;
@@ -48,7 +47,6 @@ pub fn emit_status(app: &tauri::AppHandle, state: &AppState, message: &str, prog
 
 pub struct IndexOutcome {
     pub indexed: usize,
-    pub failed: usize,
     pub skipped: usize,
     pub removed: usize,
 }
@@ -67,7 +65,6 @@ pub fn index_folder(
 
     let total = files.len();
     let mut indexed = 0usize;
-    let mut failed = 0usize;
     let mut skipped = 0usize;
     let mut removed = 0usize;
 
@@ -102,38 +99,21 @@ pub fn index_folder(
             }
         }
 
-        match extractor::extract(Path::new(&f.path)) {
-            extractor::Extraction::Ok(doc) => {
-                let doc_id = uuid::Uuid::new_v4().to_string();
-                {
-                    let mut engine = state.engine.lock().unwrap();
-                    engine.add_or_replace(
-                        &doc_id,
-                        &f.path,
-                        &crate::core::filename_of(&f.path),
-                        &f.extension,
-                        &doc.content,
-                        f.mtime,
-                        f.size,
-                    )?;
-                    engine.commit()?;
-                }
-                state.db.upsert_file(folder_id, &f.path, f.size, f.mtime, &doc_id, "ok")?;
-                indexed += 1;
-            }
-            extractor::Extraction::Skipped(reason) => {
-                let doc_id = state.db.doc_id_of(&f.path)?.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                state.db.upsert_file(folder_id, &f.path, f.size, f.mtime, &doc_id, "skipped")?;
-                state.db.record_error(&f.path, &reason)?;
-                failed += 1;
-            }
-            extractor::Extraction::Failed(reason) => {
-                let doc_id = state.db.doc_id_of(&f.path)?.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                state.db.upsert_file(folder_id, &f.path, f.size, f.mtime, &doc_id, "error")?;
-                state.db.record_error(&f.path, &reason)?;
-                failed += 1;
-            }
+        let doc_id = uuid::Uuid::new_v4().to_string();
+        {
+            let mut engine = state.engine.lock().unwrap();
+            engine.add_or_replace(
+                &doc_id,
+                &f.path,
+                &crate::core::filename_of(&f.path),
+                &f.extension,
+                f.mtime,
+                f.size,
+            )?;
+            engine.commit()?;
         }
+        state.db.upsert_file(folder_id, &f.path, f.size, f.mtime, &doc_id, "ok")?;
+        indexed += 1;
 
         if i % 25 == 0 {
             emit_status(app, state, &format!("인덱싱 중… {}/{}", i + 1, total), Some((i + 1, total)));
@@ -154,7 +134,7 @@ pub fn index_folder(
     state.db.touch_folder(folder_id)?;
     emit_status(app, state, "인덱싱 완료", Some((total, total)));
     state.busy.store(false, Ordering::Relaxed);
-    Ok(IndexOutcome { indexed, failed, skipped, removed })
+    Ok(IndexOutcome { indexed, skipped, removed })
 }
 
 /// Start watching a folder with debounce; events trigger incremental re-index
@@ -243,9 +223,6 @@ fn process_path(app: &tauri::AppHandle, state: &AppState, path: &Path) -> Result
     }
 
     let ext = crate::core::extension_of(&path_str);
-    if !crate::core::supported_extension(&ext) {
-        return Ok(());
-    }
 
     let meta = std::fs::metadata(path)?;
     let mtime = meta
@@ -262,7 +239,7 @@ fn process_path(app: &tauri::AppHandle, state: &AppState, path: &Path) -> Result
         .find(|f| crate::core::path_under(&path_str, &f.path) && f.enabled)
         .map(|f| (f.id, f.path.clone()));
 
-    let Some((folder_id, folder_path)) = owner else {
+    let Some(folder_id) = owner.map(|(id, _)| id) else {
         return Ok(());
     };
 
@@ -277,29 +254,18 @@ fn process_path(app: &tauri::AppHandle, state: &AppState, path: &Path) -> Result
         }
     }
 
-    match extractor::extract(path) {
-        extractor::Extraction::Ok(doc) => {
-            let doc_id = uuid::Uuid::new_v4().to_string();
-            state.engine.lock().unwrap().add_or_replace(
-                &doc_id,
-                &path_str,
-                &crate::core::filename_of(&path_str),
-                &ext,
-                &doc.content,
-                mtime,
-                meta.len(),
-            )?;
-            state.engine.lock().unwrap().commit()?;
-            state.db.upsert_file(folder_id, &path_str, meta.len(), mtime, &doc_id, "ok")?;
-        }
-        extractor::Extraction::Skipped(reason) | extractor::Extraction::Failed(reason) => {
-            let doc_id = uuid::Uuid::new_v4().to_string();
-            state.db.upsert_file(folder_id, &path_str, meta.len(), mtime, &doc_id, "error")?;
-            state.db.record_error(&path_str, &reason)?;
-        }
-    }
+    let doc_id = uuid::Uuid::new_v4().to_string();
+    state.engine.lock().unwrap().add_or_replace(
+        &doc_id,
+        &path_str,
+        &crate::core::filename_of(&path_str),
+        &ext,
+        mtime,
+        meta.len(),
+    )?;
+    state.engine.lock().unwrap().commit()?;
+    state.db.upsert_file(folder_id, &path_str, meta.len(), mtime, &doc_id, "ok")?;
 
-    let _ = folder_path;
     emit_status(app, state, &format!("갱신: {}", crate::core::filename_of(&path_str)), None);
     Ok(())
 }
@@ -308,7 +274,7 @@ fn process_path(app: &tauri::AppHandle, state: &AppState, path: &Path) -> Result
 /// changes that happened while the app was closed.
 pub fn reconcile_on_startup(app: &tauri::AppHandle, state: &AppState) -> Result<IndexOutcome> {
     let folders = state.db.list_folders()?;
-    let mut total = IndexOutcome { indexed: 0, failed: 0, skipped: 0, removed: 0 };
+    let mut total = IndexOutcome { indexed: 0, skipped: 0, removed: 0 };
 
     for folder in &folders {
         if !folder.enabled {
@@ -320,7 +286,6 @@ pub fn reconcile_on_startup(app: &tauri::AppHandle, state: &AppState) -> Result<
         match index_folder(app, state, folder.id, &folder.path, true) {
             Ok(outcome) => {
                 total.indexed += outcome.indexed;
-                total.failed += outcome.failed;
                 total.skipped += outcome.skipped;
                 total.removed += outcome.removed;
             }

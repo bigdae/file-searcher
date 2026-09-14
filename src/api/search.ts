@@ -18,7 +18,6 @@ export interface SearchHit {
   size: number;
   modified_at: number;
   score: number;
-  snippet: string;
 }
 
 export interface SearchResponse {
@@ -65,10 +64,8 @@ export async function stopIndexing(): Promise<void> {
   await invoke("stop_indexing");
 }
 
-export type SearchScope = "filename" | "filename_content";
-
-export async function search(query: string, scope: SearchScope): Promise<SearchResponse> {
-  return invoke<SearchResponse>("search", { query, scope });
+export async function search(query: string): Promise<SearchResponse> {
+  return invoke<SearchResponse>("search", { query });
 }
 
 export async function openFile(path: string): Promise<void> {

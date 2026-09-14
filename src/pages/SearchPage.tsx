@@ -5,7 +5,6 @@ import {
   revealInFolder,
   SearchHit,
   SearchResponse,
-  SearchScope,
 } from "../api/search";
 
 function formatSize(bytes: number): string {
@@ -44,7 +43,6 @@ function highlight(text: string, query: string): React.ReactNode {
 
 export default function SearchPage() {
   const [query, setQuery] = useState("");
-  const [scope, setScope] = useState<SearchScope>("filename_content");
   const [result, setResult] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -52,7 +50,7 @@ export default function SearchPage() {
   const debounceRef = useRef<number | null>(null);
 
   const runSearch = useCallback(
-    async (q: string, sc: SearchScope) => {
+    async (q: string) => {
       if (!q.trim()) {
         setResult(null);
         return;
@@ -60,7 +58,7 @@ export default function SearchPage() {
       setLoading(true);
       setError(null);
       try {
-        const res = await search(q, sc);
+        const res = await search(q);
         setResult(res);
       } catch (e) {
         setError(String(e));
@@ -77,11 +75,11 @@ export default function SearchPage() {
       setResult(null);
       return;
     }
-    debounceRef.current = window.setTimeout(() => runSearch(query, scope), 200);
+    debounceRef.current = window.setTimeout(() => runSearch(query), 200);
     return () => {
       if (debounceRef.current) window.clearTimeout(debounceRef.current);
     };
-  }, [query, scope, runSearch]);
+  }, [query, runSearch]);
 
   const hits = result?.hits ?? [...(result?.hits ?? [])].sort((a, b) => {
     switch (sortKey) {
@@ -102,26 +100,10 @@ export default function SearchPage() {
         <input
           className="search-box"
           autoFocus
-          placeholder="검색어를 입력하세요 (예: 스마트팩토리 ext:pdf, name:보고서)"
+          placeholder="파일명 검색 (예: 보고서, name:회의록, ext:pdf)"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
-        <div className="scope-toggle" role="radiogroup" aria-label="검색 범위">
-          <button
-            className={scope === "filename" ? "scope-btn active" : "scope-btn"}
-            onClick={() => setScope("filename")}
-            title="파일명과 경로에서만 검색합니다 (가장 빠름)"
-          >
-            파일명
-          </button>
-          <button
-            className={scope === "filename_content" ? "scope-btn active" : "scope-btn"}
-            onClick={() => setScope("filename_content")}
-            title="파일명·경로·본문 내용을 모두 검색합니다"
-          >
-            파일명+내용
-          </button>
-        </div>
       </div>
 
       <div className="result-meta">
@@ -155,9 +137,9 @@ export default function SearchPage() {
             <div className="hit-path" onClick={() => revealInFolder(hit.path)}>
               {hit.path}
             </div>
-            {hit.snippet && <div className="hit-snippet">{highlight(hit.snippet, query)}</div>}
             <div className="hit-info">
-              {hit.extension.toUpperCase()} · {formatSize(hit.size)} · {formatDate(hit.modified_at)}
+              {hit.extension ? `${hit.extension.toUpperCase()} · ` : ""}
+              {formatSize(hit.size)} · {formatDate(hit.modified_at)}
             </div>
           </div>
         ))}
