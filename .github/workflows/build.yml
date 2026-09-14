@@ -38,6 +38,12 @@ jobs:
         with:
           projectPath: "."
           tauriScript: npx @tauri-apps/cli
+          # 태그 푸시(v*) 시 GitHub Release 생성 및 설치 파일 업로드
+          tagName: ${{ github.ref_name }}
+          releaseName: "FileSearcher ${{ github.ref_name }}"
+          releaseBody: "See the assets to download this version and install."
+          releaseDraft: false
+          prerelease: false
           # 서명 미설정 단계: 서명 도입 시 환경변수 추가
           # TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
