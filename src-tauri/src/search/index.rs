@@ -4,7 +4,14 @@ use std::path::Path;
 use tantivy::collector::{Count, TopDocs};
 use tantivy::query::{BooleanQuery, Query, QueryParser};
 use tantivy::schema::*;
+use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
 use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term};
+
+/// Tokenizer name for the `filename` field: 1–3 character grams so that
+/// partial words (e.g. "A" or "회의") match files whose names merely contain
+/// them. A bare word that analyzes into multiple tokens automatically becomes
+/// a tantivy `PhraseQuery`, which is what makes substring search work.
+const FILENAME_TOKENIZER: &str = "ngram";
 
 pub struct SearchEngine {
     index: Index,
@@ -23,6 +30,33 @@ pub struct Fields {
     pub size: Field,
 }
 
+/// True when the on-disk schema is exactly the schema this build expects:
+/// same field order, names, and types. Field IDs are positional, so anything
+/// else must trigger a rebuild.
+fn schema_matches(existing: &Schema, expected: &Schema) -> bool {
+    let existing: Vec<&FieldEntry> = existing.fields().map(|(_, e)| e).collect();
+    let expected: Vec<&FieldEntry> = expected.fields().map(|(_, e)| e).collect();
+    existing.len() == expected.len()
+        && existing.iter().zip(&expected).all(|(a, b)| {
+            a.name() == b.name()
+                && format!("{:?}", a.field_type()) == format!("{:?}", b.field_type())
+        })
+}
+
+/// Delete every file/subdirectory inside `path` (keeps the directory itself).
+fn clear_dir(path: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let child = entry.path();
+        if child.is_dir() {
+            std::fs::remove_dir_all(child)?;
+        } else {
+            std::fs::remove_file(child)?;
+        }
+    }
+    Ok(())
+}
+
 impl SearchEngine {
     pub fn open(path: &Path) -> Result<Self> {
         std::fs::create_dir_all(path)?;
@@ -30,17 +64,43 @@ impl SearchEngine {
         let mut schema_builder = Schema::builder();
         let doc_id = schema_builder.add_text_field("doc_id", STRING | STORED);
         let path_f = schema_builder.add_text_field("path", TEXT | STORED);
-        let filename = schema_builder.add_text_field("filename", TEXT | STORED);
+        let filename = schema_builder.add_text_field(
+            "filename",
+            TextOptions::default()
+                .set_indexing_options(
+                    TextFieldIndexing::default()
+                        .set_tokenizer(FILENAME_TOKENIZER)
+                        .set_index_option(IndexRecordOption::WithFreqsAndPositions),
+                )
+                .set_stored(),
+        );
         let extension = schema_builder.add_text_field("extension", STRING | STORED);
         let modified_at = schema_builder.add_i64_field("modified_at", INDEXED | STORED);
         let size = schema_builder.add_u64_field("size", INDEXED | STORED);
         let schema = schema_builder.build();
 
         let index = if path.join("meta.json").exists() {
-            Index::open_in_dir(path)?
+            let index = Index::open_in_dir(path)?;
+            if schema_matches(&index.schema(), &schema) {
+                index
+            } else {
+                // Field IDs are positional. Opening an index built by an older
+                // release (e.g. 0.1.x with a `content` field) but writing with
+                // the current field IDs corrupts every document and fails with
+                // "Schema error: expected a I64 for field modified_at". Rebuild
+                // from scratch; startup reconciliation reindexes all files.
+                log::warn!("index schema mismatch — rebuilding {}", path.display());
+                clear_dir(path)?;
+                Index::create_in_dir(path, schema.clone())?
+            }
         } else {
             Index::create_in_dir(path, schema.clone())?
         };
+
+        let ngram = TextAnalyzer::builder(NgramTokenizer::new(1, 3, false)?)
+            .filter(LowerCaser)
+            .build();
+        index.tokenizers().register(FILENAME_TOKENIZER, ngram);
 
         let reader = index
             .reader_builder()

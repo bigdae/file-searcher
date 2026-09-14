@@ -46,7 +46,8 @@ pub fn parse(raw: &str) -> ParsedQuery {
             }
         } else if let Some(v) = token.strip_prefix("ext:") {
             if !v.is_empty() {
-                out.ext_filters.push(v.to_lowercase().trim_start_matches('.').to_string());
+                out.ext_filters
+                    .push(v.to_lowercase().trim_start_matches('.').to_string());
             }
         } else if let Some(v) = token.strip_prefix("path:") {
             if !v.is_empty() {

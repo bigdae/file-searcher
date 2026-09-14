@@ -78,6 +78,81 @@ fn filename_search_end_to_end() -> Result<()> {
 }
 
 #[test]
+fn partial_word_search_matches_substrings() -> Result<()> {
+    let mut engine = SearchEngine::open(&temp_dir("ngram-index"))?;
+    engine.add_or_replace("1", "/files/abc.txt", "abc.txt", "txt", 1, 10)?;
+    engine.add_or_replace("2", "/files/data.csv", "data.csv", "csv", 1, 10)?;
+    engine.add_or_replace("3", "/files/회의록_2026.md", "회의록_2026.md", "md", 1, 10)?;
+    engine.commit()?;
+
+    // A single letter matches every filename that contains it, case-insensitive
+    let single = engine.search_parsed("A", 10, &HashSet::new())?;
+    let names: HashSet<&str> = single.hits.iter().map(|h| h.filename.as_str()).collect();
+    assert!(
+        names.contains("abc.txt") && names.contains("data.csv"),
+        "{names:?}"
+    );
+    assert_eq!(single.total, 2);
+
+    // inner substring, not just a token prefix
+    let inner = engine.search_parsed("ta", 10, &HashSet::new())?;
+    assert_eq!(inner.total, 1);
+    assert_eq!(inner.hits[0].filename, "data.csv");
+
+    // Korean partial words: 회의 must match 회의록
+    let korean = engine.search_parsed("회의", 10, &HashSet::new())?;
+    assert_eq!(korean.total, 1);
+    assert!(korean.hits[0].filename.contains("회의"));
+    Ok(())
+}
+
+#[test]
+fn open_rebuilds_index_with_incompatible_older_schema() -> Result<()> {
+    let index_dir = temp_dir("schema-mismatch");
+    // Reproduce a 0.1.x index: same fields plus a `content` field that shifts
+    // every later field ID.
+    {
+        use tantivy::schema::*;
+        use tantivy::{Index, TantivyDocument};
+        let mut builder = Schema::builder();
+        let doc_id = builder.add_text_field("doc_id", STRING | STORED);
+        let path_f = builder.add_text_field("path", TEXT | STORED);
+        let filename = builder.add_text_field("filename", TEXT | STORED);
+        let extension = builder.add_text_field("extension", STRING | STORED);
+        let content = builder.add_text_field("content", TEXT | STORED);
+        let modified_at = builder.add_i64_field("modified_at", INDEXED | STORED);
+        let size = builder.add_u64_field("size", INDEXED | STORED);
+        let schema = builder.build();
+        let index = Index::create_in_dir(&index_dir, schema)?;
+        let mut writer = index.writer(50_000_000)?;
+        let mut doc = TantivyDocument::default();
+        doc.add_text(doc_id, "old-doc");
+        doc.add_text(path_f, "/old/report.txt");
+        doc.add_text(filename, "report.txt");
+        doc.add_text(extension, "txt");
+        doc.add_text(content, "body");
+        doc.add_i64(modified_at, 1);
+        doc.add_u64(size, 10);
+        writer.add_document(doc)?;
+        writer.commit()?;
+    }
+
+    // Opening must not raise "expected a I64 for field modified_at"; the stale
+    // index is rebuilt with the current schema and old documents are dropped.
+    let mut engine = SearchEngine::open(&index_dir)?;
+    engine.add_or_replace("new-doc", "/new/a.txt", "a.txt", "txt", 2, 20)?;
+    engine.commit()?;
+    assert!(engine.contains_document("new-doc", "/new/a.txt", 2, 20)?);
+    assert_eq!(engine.search_parsed("a.txt", 10, &HashSet::new())?.total, 1);
+    assert!(!engine.contains_document("old-doc", "/old/report.txt", 1, 10)?);
+    assert_eq!(
+        engine.search_parsed("report", 10, &HashSet::new())?.total,
+        0
+    );
+    Ok(())
+}
+
+#[test]
 fn incremental_skip_unchanged() -> Result<()> {
     let docs = temp_dir("inc");
     let path = docs.join("a.txt");
