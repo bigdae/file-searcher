@@ -237,30 +237,36 @@ fn reveal_in_folder(path: String) -> Result<(), String> {
     open_target(Path::new(&path), true)
 }
 
+#[cfg(target_os = "windows")]
+fn windows_shell_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{}", rest)
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        raw.into_owned()
+    }
+}
+
 fn open_target(path: &Path, reveal: bool) -> Result<(), String> {
+    if reveal {
+        return tauri_plugin_opener::reveal_item_in_dir(path).map_err(|e| e.to_string());
+    }
     #[cfg(target_os = "macos")]
     {
-        let mut cmd = std::process::Command::new("open");
-        if reveal {
-            cmd.args(["-R"]).arg(path);
-        } else {
-            cmd.arg(path);
-        }
-        cmd.spawn().map_err(|e| e.to_string())?;
+        std::process::Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(target_os = "windows")]
     {
-        if reveal {
-            std::process::Command::new("explorer")
-                .arg(format!("/select,{}", path.display()))
-                .spawn()
-                .map_err(|e| e.to_string())?;
-        } else {
-            std::process::Command::new("cmd")
-                .args(["/C", "start", "", &path.to_string_lossy()])
-                .spawn()
-                .map_err(|e| e.to_string())?;
-        }
+        let target = windows_shell_path(path);
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", target.as_str()])
+            .spawn()
+            .map_err(|e| e.to_string())?;
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
