@@ -7,13 +7,11 @@ import {
   reindexFolder,
   reindexAll,
   stopIndexing,
-  recentErrors,
   FolderRow,
 } from "../api/search";
 
 export default function SettingsPage() {
   const [folders, setFolders] = useState<FolderRow[]>([]);
-  const [errors, setErrors] = useState<[string, string, number][]>([]);
   const [busyFolder, setBusyFolder] = useState<number | null>(null);
   const [addError, setAddError] = useState<string | null>(null);
   const [stopping, setStopping] = useState(false);
@@ -21,9 +19,8 @@ export default function SettingsPage() {
 
   async function refresh() {
     try {
-      const [nextFolders, nextErrors] = await Promise.all([listFolders(), recentErrors()]);
+      const nextFolders = await listFolders();
       setFolders(nextFolders);
-      setErrors(nextErrors);
     } catch (e) {
       setAddError(`목록 조회 실패: ${e}`);
     }
@@ -131,19 +128,6 @@ export default function SettingsPage() {
           {folders.length === 0 && (
             <li className="empty">등록된 폴더가 없습니다. + 폴더 추가를 눌러 검색 위치를 등록하세요.</li>
           )}
-        </ul>
-      </section>
-
-      <section className="panel">
-        <h2>오류 파일 (최근 50건)</h2>
-        <ul className="error-list">
-          {errors.map((e, i) => (
-            <li key={i}>
-              <div className="error-path">{e[0]}</div>
-              <div className="error-msg">{e[1]}</div>
-            </li>
-          ))}
-          {errors.length === 0 && <li className="empty">오류가 없습니다.</li>}
         </ul>
       </section>
     </div>

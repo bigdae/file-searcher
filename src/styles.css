@@ -112,9 +112,18 @@ body,
 
 .search-page {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   width: 100%;
+  min-height: 0;
   padding: 16px;
+  gap: 12px;
+}
+
+.search-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
 }
 
@@ -201,23 +210,58 @@ body,
   cursor: default;
 }
 
+.hit-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .hit-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
 }
 
-.hit-title:hover {
+.hit-title:hover .hit-name {
   text-decoration: underline;
   color: var(--accent);
 }
 
+.hit-name {
+  min-width: 0;
+  word-break: break-all;
+}
+
+.file-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  height: 18px;
+  padding: 0 4px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  color: #fff;
+}
+
 .hit-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
   font-size: 12px;
   color: var(--muted);
   cursor: pointer;
-  margin-top: 2px;
-  word-break: break-all;
 }
 
 .hit-path:hover {
@@ -230,10 +274,93 @@ body,
   line-height: 1.5;
 }
 
-.hit-info {
-  font-size: 11px;
+/* ---------- Recent files ---------- */
+
+.recent-panel {
+  width: 300px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.recent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.recent-head h2 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.recent-clear {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.recent-list {
+  flex: 1;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.recent-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.recent-item:hover {
+  background: var(--accent-soft);
+}
+
+.recent-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.recent-name {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.recent-remove {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
   color: var(--muted);
-  margin-top: 6px;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.recent-remove:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--border);
+  color: var(--danger);
 }
 
 mark {
@@ -319,8 +446,7 @@ button.danger:hover:not(:disabled) {
   color: var(--danger);
 }
 
-.folder-list,
-.error-list {
+.folder-list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -363,17 +489,6 @@ button.danger:hover:not(:disabled) {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
-}
-
-.error-list li {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 10px;
-}
-
-.error-path {
-  font-size: 13px;
-  word-break: break-all;
 }
 
 .error-msg {
